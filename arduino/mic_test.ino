@@ -4,7 +4,7 @@
  * Target: Arduino UNO R4 (Renesas RA4M1)
  *
  * Wiring:
- *   MAX4466 OUT → A0
+ *   MAX4466 OUT → A4
  *   MAX4466 VCC → 3.3V
  *   MAX4466 GND → GND
  *
@@ -14,7 +14,7 @@
  */
 #include <Arduino_RouterBridge.h>
 
-#define AUDIO_PIN         A0
+#define AUDIO_PIN         A4
 #define AUDIO_SAMPLE_COUNT 32
 #define PKT_AUDIO         0x41
 
@@ -22,22 +22,16 @@ uint8_t audioBuf[AUDIO_SAMPLE_COUNT];
 
 void setup() {
   Monitor.begin(115200);
-  Bridge.begin(115200);
+  Bridge.begin();
 }
 
 void loop() {
+  //Bridge.call("mcu_line", "PING");
+  
   static unsigned long lastSampleTime = 0;
-  static unsigned long lastPingTime   = 0;
   static uint8_t sampleIdx = 0;
 
-  // Send PING once per second so Python confirms Bridge is alive
-  unsigned long now2 = millis();
-  if (now2 - lastPingTime >= 1000) {
-    lastPingTime = now2;
-    Bridge.call("mcu_line", "PING");
-  }
-
-  unsigned long now = micros();  // audio sample timer
+  unsigned long now = micros();
   if (now - lastSampleTime >= 125) {  // 8kHz
     lastSampleTime = now;
     audioBuf[sampleIdx++] = (uint8_t)(analogRead(AUDIO_PIN) >> 2);
