@@ -9,7 +9,9 @@ import io
 import json
 import math
 import os
+import sys
 import time
+import traceback
 import urllib.error
 import urllib.request
 import wave
@@ -20,15 +22,15 @@ AUDIO_SAMPLES       = 32
 ARDUINO_SAMPLE_RATE = 8000
 WHISPER_SAMPLE_RATE = 16000
 
-OPENAI_API_KEY = "YOUR_OPENAI_API_KEY_HERE"
+OPENAI_API_KEY = "YOUR_KEY_HERE"  # ← paste your real key here (do not commit)
 
 # VAD thresholds — tune if it triggers too easily or misses speech
 SPEECH_THRESHOLD   = 6    # std above this = speech detected
 SILENCE_THRESHOLD  = 4.5  # std below this = silence
-SILENCE_PACKETS    = 100  # ~0.4s of silence before transcribing
+SILENCE_PACKETS    = 50   # ~0.2s of silence before transcribing
 MIN_SPEECH_PACKETS = 10   # minimum packets to bother transcribing
 PRE_ROLL_PACKETS   = 50   # ~0.2s of audio kept before speech starts
-MAX_RECORD_PACKETS = 500  # ~2s max recording before forced transcription
+MAX_RECORD_PACKETS = 2500 # ~10s max recording before forced transcription
 
 _pre_roll      = []   # rolling window before speech
 _speech_buf    = []   # audio during speech
@@ -103,7 +105,7 @@ def mcu_line(msg: str):
         print(f"[DEBUG] {_packet_count} packets, speaking={_speaking}, speech_buf={len(_speech_buf)}")
 
     if not line.startswith("A:"):
-        print(f"[DEBUG] skipping non-audio line: {line[:40]}")
+        print(f"[BRIDGE] received: {line[:60]}")
         return
 
     try:
@@ -157,7 +159,12 @@ def mcu_line(msg: str):
                 return
 
             print(f"[TRANSCRIBE] building wav from {len(chunks)} chunks...")
-            wav = build_wav(chunks)
+            wav       = build_wav(chunks)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            wav_path  = f"/app/python/clip_{timestamp}.wav"
+            with open(wav_path, "wb") as f:
+                f.write(wav)
+            print(f"[FILE] wav saved to {wav_path}")
             print(f"[TRANSCRIBE] wav size={len(wav)} bytes, calling Whisper API...")
             t0  = time.time()
             try:
@@ -166,14 +173,31 @@ def mcu_line(msg: str):
                 print(f"[TRANSCRIBE] done in {elapsed:.1f}s")
                 result = f'"{text}"' if text else "(silence)"
                 print(f"\n>>> {result}\n")
-                with open("/home/arduino/ArduinoApps/rock/python/transcript.log", "a") as f:
+                log_path = "/app/python/transcript.log"
+                with open(log_path, "a") as f:
                     f.write(result + "\n")
+                print(f"[FILE] saved to {log_path}")
             except urllib.error.HTTPError as e:
-                print(f"[ERROR HTTP {e.code}] {e.read().decode()}\n")
+                body = e.read().decode()
+                print(f"[ERROR] HTTP {e.code} from Whisper API:")
+                print(f"        {body}\n")
+            except urllib.error.URLError as e:
+                print(f"[ERROR] Network error (no internet?): {e.reason}\n")
             except Exception as e:
-                print(f"[ERROR] {type(e).__name__}: {e}\n")
+                print(f"[ERROR] {type(e).__name__}: {e}")
+                traceback.print_exc()
 
 
-print(f"Listening... speak to trigger recording (SPEECH_THRESHOLD={SPEECH_THRESHOLD})\n")
+# ── Startup checks ────────────────────────────────────────────────
+print("=" * 50)
+print("[STARTUP] test_stt.py starting")
+print(f"[STARTUP] Python {sys.version}")
+print(f"[STARTUP] OPENAI_API_KEY set: {OPENAI_API_KEY != 'YOUR_KEY_HERE'}")
+print(f"[STARTUP] API key prefix: {OPENAI_API_KEY[:8]}...")
+print(f"[STARTUP] SPEECH_THRESHOLD={SPEECH_THRESHOLD}  SILENCE_THRESHOLD={SILENCE_THRESHOLD}")
+print(f"[STARTUP] MAX_RECORD_PACKETS={MAX_RECORD_PACKETS} (~{MAX_RECORD_PACKETS*AUDIO_SAMPLES/ARDUINO_SAMPLE_RATE:.1f}s)")
+print("=" * 50)
+print("Listening... speak near the mic\n")
+
 Bridge.provide("mcu_line", mcu_line)
 App.run()

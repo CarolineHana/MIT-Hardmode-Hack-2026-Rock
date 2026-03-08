@@ -22,13 +22,22 @@ uint8_t audioBuf[AUDIO_SAMPLE_COUNT];
 
 void setup() {
   Monitor.begin(115200);
+  Bridge.begin(115200);
 }
 
 void loop() {
   static unsigned long lastSampleTime = 0;
+  static unsigned long lastPingTime   = 0;
   static uint8_t sampleIdx = 0;
 
-  unsigned long now = micros();
+  // Send PING once per second so Python confirms Bridge is alive
+  unsigned long now2 = millis();
+  if (now2 - lastPingTime >= 1000) {
+    lastPingTime = now2;
+    Bridge.call("mcu_line", "PING");
+  }
+
+  unsigned long now = micros();  // audio sample timer
   if (now - lastSampleTime >= 125) {  // 8kHz
     lastSampleTime = now;
     audioBuf[sampleIdx++] = (uint8_t)(analogRead(AUDIO_PIN) >> 2);
