@@ -1,0 +1,5 @@
+pyserial>=3.5
+faster-whisper
+anthropic>=0.40.0
+numpy
+scipy
