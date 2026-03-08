@@ -5,6 +5,7 @@ Uses only stdlib + arduino.app_utils — no numpy, no pydantic, no compiled exte
 """
 
 import array
+import base64
 import io
 import json
 import math
@@ -16,19 +17,28 @@ import wave
 
 from arduino.app_utils import Bridge, App
 
-AUDIO_SAMPLES       = 32
 ARDUINO_SAMPLE_RATE = 8000
 WHISPER_SAMPLE_RATE = 16000
+FRAME_SAMPLES       = 160  # 20ms @ 8kHz
+FRAME_MS            = int(FRAME_SAMPLES * 1000 / ARDUINO_SAMPLE_RATE)
 
-OPENAI_API_KEY = "YOUR_OPENAI_API_KEY_HERE"
+OPENAI_API_KEY = os.environ.get("YOUR_API_KEY_HERE", "").strip() or None
+_warned_no_key = False
+if not OPENAI_API_KEY:
+    print("[WARN] OPENAI_API_KEY not set. Audio will stream but transcription is disabled.")
 
 # VAD thresholds — tune if it triggers too easily or misses speech
-SPEECH_THRESHOLD   = 6    # std above this = speech detected
-SILENCE_THRESHOLD  = 4.5  # std below this = silence
-SILENCE_PACKETS    = 100  # ~0.4s of silence before transcribing
-MIN_SPEECH_PACKETS = 10   # minimum packets to bother transcribing
-PRE_ROLL_PACKETS   = 50   # ~0.2s of audio kept before speech starts
-MAX_RECORD_PACKETS = 500  # ~2s max recording before forced transcription
+SPEECH_THRESHOLD   = 2.0    # std above this = speech detected (more sensitive)
+SILENCE_THRESHOLD  = 1.2    # std below this = silence
+SILENCE_MS         = 400
+MIN_SPEECH_MS      = 200
+PRE_ROLL_MS        = 200
+MAX_RECORD_MS      = 2000
+
+SILENCE_PACKETS    = max(1, SILENCE_MS // FRAME_MS)
+MIN_SPEECH_PACKETS = max(1, MIN_SPEECH_MS // FRAME_MS)
+PRE_ROLL_PACKETS   = max(1, PRE_ROLL_MS // FRAME_MS)
+MAX_RECORD_PACKETS = max(1, MAX_RECORD_MS // FRAME_MS)
 
 _pre_roll      = []   # rolling window before speech
 _speech_buf    = []   # audio during speech
@@ -38,6 +48,12 @@ _silence_count = 0
 
 def transcribe(wav_bytes: bytes, api_key: str) -> str:
     """Call Whisper API with urllib — no openai SDK, no pydantic."""
+    global _warned_no_key
+    if not api_key:
+        if not _warned_no_key:
+            print("[WARN] No OPENAI_API_KEY; skipping transcription.")
+            _warned_no_key = True
+        return ""
     boundary = "----ArduinoSTTBoundary"
     body = (
         f"--{boundary}\r\n"
@@ -87,6 +103,21 @@ def packet_std(samples: bytes) -> float:
     return math.sqrt(sum((x - mean) ** 2 for x in samples) / len(samples))
 
 
+def normalize_samples(samples: bytes) -> bytes:
+    """Auto-gain: center around 128 and scale to use full 8-bit range."""
+    if not samples:
+        return samples
+    mn = min(samples)
+    mx = max(samples)
+    if mx <= mn:
+        return samples
+    scale = 255.0 / (mx - mn)
+    out = bytearray(len(samples))
+    for i, x in enumerate(samples):
+        out[i] = int((x - mn) * scale)
+    return bytes(out)
+
+
 _packet_count = 0
 
 def mcu_line(msg: str):
@@ -102,17 +133,25 @@ def mcu_line(msg: str):
     if _packet_count % 250 == 0:
         print(f"[DEBUG] {_packet_count} packets, speaking={_speaking}, speech_buf={len(_speech_buf)}")
 
-    if not line.startswith("A:"):
+    if not (line.startswith("B:") or line.startswith("A:")):
         print(f"[DEBUG] skipping non-audio line: {line[:40]}")
         return
 
-    try:
-        samples = bytes([int(x) for x in line[2:].split(",")])
-    except ValueError as e:
-        print(f"[DEBUG] parse error: {e} on line: {line[:40]}")
-        return
+    if line.startswith("B:"):
+        try:
+            samples = base64.b64decode(line[2:], validate=True)
+        except Exception as e:
+            print(f"[DEBUG] base64 parse error: {e} on line: {line[:40]}")
+            return
+        samples = normalize_samples(samples)
+    else:
+        try:
+            samples = bytes([int(x) for x in line[2:].split(",")])
+        except ValueError as e:
+            print(f"[DEBUG] parse error: {e} on line: {line[:40]}")
+            return
 
-    if len(samples) != AUDIO_SAMPLES:
+    if len(samples) != FRAME_SAMPLES:
         print(f"[DEBUG] wrong sample count: {len(samples)}")
         return
 
@@ -139,7 +178,7 @@ def mcu_line(msg: str):
         else:
             _silence_count = 0
 
-        dur = len(_speech_buf) * AUDIO_SAMPLES / ARDUINO_SAMPLE_RATE
+        dur = len(_speech_buf) * FRAME_SAMPLES / ARDUINO_SAMPLE_RATE
         if len(_speech_buf) % 50 == 0:
             print(f"[recording] {dur:.1f}s  std={std:.1f}  silence_count={_silence_count}", flush=True)
 
@@ -166,8 +205,7 @@ def mcu_line(msg: str):
                 print(f"[TRANSCRIBE] done in {elapsed:.1f}s")
                 result = f'"{text}"' if text else "(silence)"
                 print(f"\n>>> {result}\n")
-                with open("/home/arduino/ArduinoApps/rock/python/transcript.log", "a") as f:
-                    f.write(result + "\n")
+                # Console output only to keep latency low.
             except urllib.error.HTTPError as e:
                 print(f"[ERROR HTTP {e.code}] {e.read().decode()}\n")
             except Exception as e:
